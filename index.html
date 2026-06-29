@@ -192,8 +192,8 @@ footer a{color:var(--orange-dark);font-weight:700;text-decoration:none}
 
 <div class="toast" id="toast"></div>
 
-<link href="https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.css" rel="stylesheet">
-<script src="https://api.mapbox.com/mapbox-gl-js/v3.7.0/mapbox-gl.js"></script>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -217,8 +217,6 @@ const CENTROIDS = {
   "México":[-102,23],"Nicaragua":[-85,12.8],"Panamá":[-80,8.5],"Paraguay":[-58,-23],
   "Perú":[-75,-9.5],"República Dominicana":[-70.7,19],"Uruguay":[-56,-33],"Venezuela":[-66,7]
 };
-/* Mapbox public token (pk....). Leave empty to use the built-in SVG map. */
-const MAPBOX_TOKEN = "";
 
 /* ---- base-path-agnostic router (works on GH Pages subpaths) ---- */
 let BASE = (function(){
@@ -587,68 +585,62 @@ function countryPoints(byCountry){
     const co=CENTROIDS[c]; return co?{c,fab:v.fab,ent:v.ent,lon:co[0],lat:co[1]}:null;
   }).filter(Boolean);
 }
-/* picks Mapbox if a token is set, else the inline SVG map */
+/* Real-world choropleth via Leaflet + CARTO basemap (no token). SVG fallback if Leaflet/GeoJSON unavailable. */
 function mapSection(byCountry){
   const pts=countryPoints(byCountry);
   if(!pts.length) return "";
-  if(MAPBOX_TOKEN && window.mapboxgl){
-    setTimeout(()=>initMapbox(pts),0);
+  if(window.L){
+    setTimeout(()=>initLeaflet(byCountry),30);
     return `<section class="block"><h2><span class="tick"></span>Producción por país</h2>
-      <div id="mapbox-map" style="height:380px;border:2px solid var(--line);border-radius:14px;overflow:hidden"></div>
-      <p class="muted" style="font-size:11px;margin-top:6px">Tamaño = unidades fabricadas. Toca un país para filtrar.</p></section>`;
+      <div id="leaflet-map" style="height:420px;border:2px solid var(--line);border-radius:14px;overflow:hidden;background:var(--paper-warm)"></div>
+      <p class="muted" style="font-size:11px;margin-top:6px">Color = unidades fabricadas. Toca un país para filtrar.</p></section>`;
   }
   return buildCountryMap(byCountry);
 }
-/* Spanish country name -> ISO 3166-1 alpha-2 (matches Mapbox boundaries) */
-const ISO2={"Colombia":"CO","Venezuela":"VE","Estados Unidos":"US","Panamá":"PA","Argentina":"AR",
-  "México":"MX","Uruguay":"UY","España":"ES","El Salvador":"SV","Chile":"CL","Bolivia":"BO",
-  "Ecuador":"EC","Perú":"PE","Costa Rica":"CR","Cuba":"CU","Guatemala":"GT","Honduras":"HN",
-  "Nicaragua":"NI","Paraguay":"PY","República Dominicana":"DO"};
+/* Spanish country name -> ISO 3166-1 alpha-3 (matches the world GeoJSON feature ids) */
+const ISO3={"Colombia":"COL","Venezuela":"VEN","Estados Unidos":"USA","Panamá":"PAN","Argentina":"ARG",
+  "México":"MEX","Uruguay":"URY","España":"ESP","El Salvador":"SLV","Chile":"CHL","Bolivia":"BOL",
+  "Ecuador":"ECU","Perú":"PER","Costa Rica":"CRI","Cuba":"CUB","Guatemala":"GTM","Honduras":"HND",
+  "Nicaragua":"NIC","Paraguay":"PRY","República Dominicana":"DOM"};
 function orangeScale(t){ // t 0..1 -> light to deep orange
   const a=[250,224,200], b=[166,60,8];
   const c=a.map((v,i)=>Math.round(v+(b[i]-v)*t));
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
-let _map=null, _lastByCountry={};
-function initMapbox(pts){
-  const el=document.getElementById("mapbox-map"); if(!el||!window.mapboxgl) return;
+let _lmap=null, _geo=null, _lastByCountry={};
+async function initLeaflet(byCountry){
+  const el=document.getElementById("leaflet-map"); if(!el||!window.L) return;
   try{
-    mapboxgl.accessToken=MAPBOX_TOKEN;
-    const maxFab=Math.max(1,...pts.map(p=>p.fab));
-    // data-driven fill color per country ISO
-    const match=["match",["get","iso_3166_1"]];
-    pts.forEach(p=>{ const iso=ISO2[p.c]; if(iso){ const t=Math.pow(p.fab/maxFab,0.45); match.push(iso, orangeScale(t)); }});
-    match.push("rgba(0,0,0,0)");
-    const map=new mapboxgl.Map({container:el,style:"mapbox://styles/mapbox/light-v11",
-      center:[-55,8],zoom:1.3,attributionControl:false});
-    map.addControl(new mapboxgl.NavigationControl({showCompass:false}),"top-right");
-    map.on("load",()=>{
-      map.addSource("countries",{type:"vector",url:"mapbox://mapbox.country-boundaries-v1"});
-      map.addLayer({id:"cfill",type:"fill",source:"countries","source-layer":"country_boundaries",
-        paint:{"fill-color":match,"fill-opacity":0.9}});
-      map.addLayer({id:"cline",type:"line",source:"countries","source-layer":"country_boundaries",
-        paint:{"line-color":"#E6DEC8","line-width":0.4}});
-      const fabByIso={}; pts.forEach(p=>{ if(ISO2[p.c]) fabByIso[ISO2[p.c]]={c:p.c,fab:p.fab,ent:p.ent}; });
-      const pop=new mapboxgl.Popup({closeButton:false,closeOnClick:false});
-      map.on("mousemove","cfill",e=>{ const iso=e.features[0].properties.iso_3166_1; const d=fabByIso[iso];
-        if(d){ map.getCanvas().style.cursor="pointer";
-          pop.setLngLat(e.lngLat).setHTML(`<b style="font-family:var(--font)">${d.c}</b><br>${d.fab} fab · ${d.ent} ent`).addTo(map);
-        } else { pop.remove(); map.getCanvas().style.cursor=""; } });
-      map.on("mouseleave","cfill",()=>{ pop.remove(); map.getCanvas().style.cursor=""; });
-      map.on("click","cfill",e=>{ const iso=e.features[0].properties.iso_3166_1;
-        if(fabByIso[iso]) setPaisFromMap(fabByIso[iso].c); });
-      const b=new mapboxgl.LngLatBounds(); pts.forEach(p=>b.extend([p.lon,p.lat]));
-      if(pts.length) map.fitBounds(b,{padding:70,maxZoom:5,duration:0});
-    });
-    // legend
-    const lg=document.createElement("div");
-    lg.style.cssText="position:absolute;left:10px;bottom:10px;background:var(--paper);border:1.5px solid var(--line);border-radius:8px;padding:7px 10px;font-size:10px;font-weight:700;color:var(--ink);z-index:2";
-    lg.innerHTML=`<div style="margin-bottom:4px">Unidades fabricadas</div>
-      <div style="height:8px;width:140px;border-radius:4px;background:linear-gradient(90deg,${orangeScale(0.05)},${orangeScale(1)})"></div>
-      <div style="display:flex;justify-content:space-between;color:var(--muted);margin-top:2px"><span>menos</span><span>${maxFab}</span></div>`;
-    el.style.position="relative"; el.appendChild(lg);
-    _map=map;
-  }catch(e){ console.warn("mapbox:",e.message); el.outerHTML=buildCountryMap(_lastByCountry||{}); }
+    if(_lmap){ _lmap.remove(); _lmap=null; }
+    const map=L.map(el,{scrollWheelZoom:false,attributionControl:true,minZoom:1}).setView([10,-55],2);
+    _lmap=map;
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+      {subdomains:"abcd",maxZoom:8,attribution:"© OpenStreetMap, © CARTO"}).addTo(map);
+    const byIso={}; let maxFab=1;
+    Object.entries(byCountry).forEach(([c,v])=>{ const iso=ISO3[c]; if(iso){ byIso[iso]={c,fab:v.fab,ent:v.ent}; maxFab=Math.max(maxFab,v.fab); }});
+    if(!_geo){ _geo=await fetch("https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json").then(r=>r.json()); }
+    const layer=L.geoJSON(_geo,{
+      style:f=>{ const d=byIso[f.id]; const t=d?Math.pow(d.fab/maxFab,0.45):0;
+        return {weight:0.5,color:"#E6DEC8",fillColor:d?orangeScale(t):"#efece3",fillOpacity:d?0.92:0.25}; },
+      onEachFeature:(f,lyr)=>{ const d=byIso[f.id]; if(d){
+        lyr.bindTooltip(`<b>${d.c}</b><br>${d.fab} fab · ${d.ent} ent`,{sticky:true});
+        lyr.on("click",()=>setPaisFromMap(d.c));
+        lyr.on("mouseover",()=>lyr.setStyle({weight:1.6,color:"#E2580E"}));
+        lyr.on("mouseout",()=>lyr.setStyle({weight:0.5,color:"#E6DEC8"}));
+      }}
+    }).addTo(map);
+    const withData=L.geoJSON(_geo,{filter:f=>byIso[f.id]});
+    try{ const b=withData.getBounds(); if(b.isValid()) map.fitBounds(b,{padding:[28,28],maxZoom:5}); }catch(e){}
+    const lg=L.control({position:"bottomleft"});
+    lg.onAdd=()=>{ const div=L.DomUtil.create("div");
+      div.style.cssText="background:var(--paper);border:1.5px solid var(--line);border-radius:8px;padding:7px 10px;font:700 10px var(--font);color:var(--ink)";
+      div.innerHTML=`<div style="margin-bottom:4px">Unidades fabricadas</div>
+        <div style="height:8px;width:140px;border-radius:4px;background:linear-gradient(90deg,${orangeScale(0.05)},${orangeScale(1)})"></div>
+        <div style="display:flex;justify-content:space-between;color:var(--muted);margin-top:2px"><span>menos</span><span>${maxFab}</span></div>`;
+      return div; };
+    lg.addTo(map);
+    setTimeout(()=>map.invalidateSize(),200);
+  }catch(e){ console.warn("leaflet:",e.message); el.outerHTML=buildCountryMap(_lastByCountry||byCountry||{}); }
 }
 /* proportional-symbol map of fabricated units per country (SVG fallback) */
 function buildCountryMap(byCountry){
